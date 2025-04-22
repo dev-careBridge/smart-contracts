@@ -23,7 +23,7 @@ contract Test_RevocationFunctions is Test, IERC721Receiver {
         vm.stopPrank();
 
         // Test contract (owner) approves the genesis application
-        mv.approveGenesis(GENESIS_APPROVER);
+        mv.handleGenesisApplication(GENESIS_APPROVER, true);
     }
 
     // Updated helper functions
@@ -33,7 +33,7 @@ contract Test_RevocationFunctions is Test, IERC721Receiver {
         vm.stopPrank();
 
         // Test contract (owner) approves the member
-        mv.approveGenesis(member);
+        mv.handleGenesisApplication(member, true);
     }
 
     function _createDaoMember(address user) internal {
@@ -121,7 +121,7 @@ contract Test_RevocationFunctions is Test, IERC721Receiver {
         _createDaoMember(target);
         vm.prank(proposer);
         mv.proposeRevocation(target);
-        (,, uint256 endTime) = mv.getRevocationProposal(target);
+        uint256 endTime = mv.getRevocationProposalEndTime(target);
         assertGt(endTime, 0);
     }
 
@@ -197,7 +197,7 @@ contract Test_RevocationFunctions is Test, IERC721Receiver {
         mv.voteOnRevocation(target, true);
         vm.warp(block.timestamp + mv.VOTING_PERIOD());
         mv.finalizeRevocation(target);
-        (, MedicalVerifier.ApplicationStatus status,,) = mv.getVerifierData(target); // Corrected destructuring
+        (, MedicalVerifier.ApplicationStatus status,,) = mv.getVerifierData(target);
         assertEq(uint256(status), uint256(MedicalVerifier.ApplicationStatus.Revoked));
         assertEq(mv.hasNFT(target), false);
     }
@@ -266,7 +266,7 @@ contract MedicalVerifier_Test is Test {
 
             // 2. Approve as owner
             vm.prank(owner);
-            mv.approveGenesis(genesis[i]);
+            mv.handleGenesisApplication(genesis[i], true);
         }
     }
 
@@ -289,11 +289,17 @@ contract MedicalVerifier_Test is Test {
     }
 
     function test_ApplyHP_EmptyFields() public {
-        vm.expectRevert(MedicalVerifier.MedicalVerifier__FullNameRequired.selector);
+        vm.expectRevert(abi.encodeWithSelector(
+        MedicalVerifier.MedicalVerifier__EmptyField.selector,
+        1
+        ));
         vm.prank(applicant1);
         mv.applyAsHealthProfessional("", "contact", "gov", "docs");
 
-        vm.expectRevert(MedicalVerifier.MedicalVerifier__GovernmentIDRequired.selector);
+        vm.expectRevert(abi.encodeWithSelector(
+        MedicalVerifier.MedicalVerifier__EmptyField.selector,
+        3
+        ));
         vm.prank(applicant1);
         mv.applyAsHealthProfessional("Name", "contact", "", "docs");
     }
@@ -397,7 +403,7 @@ contract MedicalVerifier_Test is Test {
             vm.prank(newGenesis[i]);
             mv.applyAsGenesis("Gen", "contact", "id", "docs");
             vm.prank(owner);
-            mv.approveGenesis(newGenesis[i]);
+            mv.handleGenesisApplication(newGenesis[i], true);
         }
 
         applyAsHealthProfessional(applicant1);
@@ -423,7 +429,7 @@ contract MedicalVerifier_Test is Test {
             vm.prank(genesisMembers[i]);
             mv.applyAsGenesis("Gen", "contact", "id", "docs");
             vm.prank(owner);
-            mv.approveGenesis(genesisMembers[i]);
+            mv.handleGenesisApplication(genesisMembers[i], true);
         }
 
         // Approve 5 Health Professionals via Genesis votes
@@ -463,7 +469,10 @@ contract MedicalVerifier_Test is Test {
 
     function test_MaxStringLength() public {
         string memory longString = new string(mv.MAX_STRING_LENGTH() + 1);
-        vm.expectRevert("Input too long");
+        vm.expectRevert(abi.encodeWithSelector(
+        MedicalVerifier.MedicalVerifier__StringTooLong.selector,
+        1
+        ));
         vm.prank(applicant1);
         mv.applyAsDaoVerifier(longString, "contact", "gov");
     }
@@ -488,7 +497,7 @@ contract MedicalVerifierTest is StdCheats, Test {
             verifier.applyAsGenesis("Valid Name", "contact", "govID", "docs");
 
             vm.prank(OWNER);
-            verifier.approveGenesis(member);
+            verifier.handleGenesisApplication(member, true);
         }
     }
 
@@ -530,7 +539,12 @@ contract MedicalVerifierTest is StdCheats, Test {
         ];
 
         vm.prank(TEST_USER);
-        vm.expectRevert(abi.encodeWithSignature("MedicalVerifier__FullNameRequired()"));
+        vm.expectRevert(
+        abi.encodeWithSelector(
+            MedicalVerifier.MedicalVerifier__EmptyField.selector,
+            1 // First validation failure is fullName field
+        )
+        );
         verifier.applyAsGenesis(inputs[0], inputs[1], inputs[2], inputs[3]);
     }
 
@@ -555,62 +569,62 @@ contract MedicalVerifierTest is StdCheats, Test {
         // Should reject approval
         vm.prank(OWNER);
         vm.expectRevert(abi.encodeWithSignature("MedicalVerifier__NoApplicationFound()"));
-        verifier.approveGenesis(TEST_USER);
+        verifier.handleGenesisApplication(TEST_USER, true);
     }
 
-function test_applyAsGenesis_RevokedMemberCanReapply() public {
-    address genesisApplicant = address(2);
-    address contractOwner = verifier.owner();
+    function test_applyAsGenesis_RevokedMemberCanReapply() public {
+        address genesisApplicant = address(2);
+        address contractOwner = verifier.owner();
 
-    // 1. Setup Genesis Committee
-    vm.startPrank(contractOwner);
-    verifier.applyAsGenesis("Genesis Member", "genesis@email.com", "GENESIS-ID", "Docs");
-    vm.stopPrank();
+        // 1. Setup Genesis Committee
+        vm.startPrank(contractOwner);
+        verifier.applyAsGenesis("Genesis Member", "genesis@email.com", "GENESIS-ID", "Docs");
+        vm.stopPrank();
 
-    // 2. Approve Genesis Member (must be owner)
-    vm.prank(contractOwner);
-    verifier.approveGenesis(contractOwner);
+        // 2. Approve Genesis Member (must be owner)
+        vm.prank(contractOwner);
+        verifier.handleGenesisApplication(contractOwner, true);
 
-    // 3. Apply & approve test Genesis member
-    vm.startPrank(genesisApplicant);
-    verifier.applyAsGenesis("Alice", "alice@email.com", "ID123", "Docs");
-    vm.stopPrank();
+        // 3. Apply & approve test Genesis member
+        vm.startPrank(genesisApplicant);
+        verifier.applyAsGenesis("Alice", "alice@email.com", "ID123", "Docs");
+        vm.stopPrank();
 
-    // Corrected Step 4: Owner approves the genesisApplicant's Genesis application
-    vm.prank(contractOwner);
-    verifier.approveGenesis(genesisApplicant);
+        // Corrected Step 4: Owner approves the genesisApplicant's Genesis application
+        vm.prank(contractOwner);
+        verifier.handleGenesisApplication(genesisApplicant, true);
 
-    // 5. Convert Genesis to DAO members (simulate Genesis period ending)
-    vm.warp(block.timestamp + verifier.GENESIS_TIMEOUT() + 1);
-    verifier.checkGenesisTimeout();
+        // 5. Convert Genesis to DAO members (simulate Genesis period ending)
+        vm.warp(block.timestamp + verifier.GENESIS_TIMEOUT() + 1);
+        verifier.checkGenesisTimeout();
 
-    // 6. Verify conversion to DAO
-    (MedicalVerifier.VerifierType vType,,,) = verifier.getVerifierData(contractOwner);
-    assertEq(uint256(vType), uint256(MedicalVerifier.VerifierType.Dao));
+        // 6. Verify conversion to DAO
+        (MedicalVerifier.VerifierType vType,,,) = verifier.getVerifierData(contractOwner);
+        assertEq(uint256(vType), uint256(MedicalVerifier.VerifierType.Dao));
 
-    // 7. Propose revocation using converted DAO member
-    vm.prank(contractOwner);
-    verifier.proposeRevocation(genesisApplicant);
+        // 7. Propose revocation using converted DAO member
+        vm.prank(contractOwner);
+        verifier.proposeRevocation(genesisApplicant);
 
-    // 8. Vote and finalize revocation
-    vm.prank(contractOwner);
-    verifier.voteOnRevocation(genesisApplicant, true);
-    vm.warp(block.timestamp + verifier.VOTING_PERIOD());
-    verifier.finalizeRevocation(genesisApplicant);
+        // 8. Vote and finalize revocation
+        vm.prank(contractOwner);
+        verifier.voteOnRevocation(genesisApplicant, true);
+        vm.warp(block.timestamp + verifier.VOTING_PERIOD());
+        verifier.finalizeRevocation(genesisApplicant);
 
-    // 9. Verify revocation prevents reapplication
-    vm.startPrank(genesisApplicant);
-    vm.expectRevert(abi.encodeWithSignature("MedicalVerifier__AlreadyApplied()"));
-    verifier.applyAsGenesis("New Alice", "new@email.com", "ID456", "NewDocs");
-    vm.stopPrank();
-}
+        // 9. Verify revocation prevents reapplication
+        vm.startPrank(genesisApplicant);
+        vm.expectRevert(abi.encodeWithSignature("MedicalVerifier__AlreadyApplied()"));
+        verifier.applyAsGenesis("New Alice", "new@email.com", "ID456", "NewDocs");
+        vm.stopPrank();
+    }
 
     // Test 8: Mixed verifier types rejection
     function test_applyAsGenesis_RevertWhenExistingVerifierType() public {
         // Setup Genesis member (OWNER)
         vm.startPrank(OWNER);
         verifier.applyAsGenesis("Owner Genesis", "owner@email.com", "OWNER-ID", "Docs");
-        verifier.approveGenesis(OWNER);
+        verifier.handleGenesisApplication(OWNER, true);
         vm.stopPrank();
 
         // TEST_USER applies as HealthProfessional
@@ -652,29 +666,23 @@ contract MedicalVerifierEmergencyTest is Test {
         // Deploy contract
         vm.prank(owner);
         mv = new MedicalVerifier();
-        
+
         // Setup genesis member
         vm.startPrank(genesisMember);
         mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
         vm.stopPrank();
-        
-        vm.prank(owner);
-        mv.approveGenesis(genesisMember);
-    }
 
+        vm.prank(owner);
+        mv.handleGenesisApplication(genesisMember, true);
+    }
 
     function test_EmergencyPause_OnlyOwner() public {
         address nonOwner = address(666);
         vm.prank(nonOwner);
-        
+
         // Use correct error name from Ownable
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                Ownable.OwnableUnauthorizedAccount.selector, 
-                nonOwner
-            )
-        );
-        
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
+
         mv.emergencyPause(1 days);
     }
 
@@ -682,11 +690,11 @@ contract MedicalVerifierEmergencyTest is Test {
         // Create a valid applicant first
         vm.prank(applicant);
         mv.applyAsHealthProfessional("Dr. Test", "contact", "govID", "docs");
-        
+
         // Genesis member votes to approve
         vm.prank(genesisMember);
         mv.voteOnApplication(applicant, true);
-        
+
         // Finalize application
         vm.warp(block.timestamp + mv.VOTING_PERIOD());
         mv.finalizeApplication(applicant);
@@ -694,7 +702,7 @@ contract MedicalVerifierEmergencyTest is Test {
         // Test pause functionality
         vm.prank(owner);
         mv.emergencyPause(1 days);
-        
+
         (bool paused,,) = mv.emergency();
         assertTrue(paused);
 
@@ -707,10 +715,10 @@ contract MedicalVerifierEmergencyTest is Test {
     function test_EmergencyOverrideLimits_DuringEmergency() public {
         vm.prank(owner);
         mv.emergencyPause(1 days);
-        
+
         vm.prank(owner);
         mv.emergencyOverrideLimits(25, 25);
-        
+
         assertEq(mv.maxHealthProfessionals(), 25);
         assertEq(mv.maxManualDaoVerifiers(), 25);
     }
@@ -718,9 +726,9 @@ contract MedicalVerifierEmergencyTest is Test {
     function test_EmergencyOverrideLimits_AfterExpiryFails() public {
         vm.prank(owner);
         mv.emergencyPause(1 days);
-        
+
         vm.warp(block.timestamp + 2 days);
-        
+
         vm.prank(owner);
         vm.expectRevert(MedicalVerifier.MedicalVerifier__UnauthorizedAccess.selector);
         mv.emergencyOverrideLimits(25, 25);
@@ -744,7 +752,7 @@ contract DonationTests is Test {
         vm.prank(genesisMember);
         mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
         vm.prank(owner);
-        mv.approveGenesis(genesisMember);
+        mv.handleGenesisApplication(genesisMember, true);
 
         // Create and approve DAO member
         vm.startPrank(daoMember);
@@ -769,23 +777,23 @@ contract DonationTests is Test {
         assertEq(mv.donationHandler(), donationHandler, "Donation handler not configured");
     }
 
-function test_RecordDonation_AutoDAOApproval() public {
-    // Destructure emergency settings tuple
-    (bool paused,,) = mv.emergency();
-    assertFalse(paused, "Contract should not be paused");
-    
-    uint256 campaignId = 1;
-    
-    vm.startPrank(mv.donationHandler());
-    for (uint i = 0; i < mv.MIN_CAMPAIGNS_REQUIRED(); i++) {
-        mv.recordDonation(donor, campaignId + i, mv.MIN_DONATION() + 1);
-    }
-    vm.stopPrank();
+    function test_RecordDonation_AutoDAOApproval() public {
+        // Destructure emergency settings tuple
+        (bool paused,,) = mv.emergency();
+        assertFalse(paused, "Contract should not be paused");
 
-    (MedicalVerifier.VerifierType vType,,,) = mv.getVerifierData(donor);
-    assertEq(uint256(vType), uint256(MedicalVerifier.VerifierType.AutoDao));
-    assertTrue(mv.hasNFT(donor));
-}
+        uint256 campaignId = 1;
+
+        vm.startPrank(mv.donationHandler());
+        for (uint256 i = 0; i < mv.MIN_CAMPAIGNS_REQUIRED(); i++) {
+            mv.recordDonation(donor, campaignId + i, mv.MIN_DONATION() + 1);
+        }
+        vm.stopPrank();
+
+        (MedicalVerifier.VerifierType vType,,,) = mv.getVerifierData(donor);
+        assertEq(uint256(vType), uint256(MedicalVerifier.VerifierType.AutoDao));
+        assertTrue(mv.hasNFT(donor));
+    }
 }
 
 contract StringValidationTests is Test {
@@ -804,7 +812,7 @@ contract StringValidationTests is Test {
         vm.prank(genesisMember);
         mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
         vm.prank(owner);
-        mv.approveGenesis(genesisMember);
+        mv.handleGenesisApplication(genesisMember, true);
 
         // End genesis period by fast-forwarding time
         vm.warp(block.timestamp + mv.GENESIS_TIMEOUT() + 1);
@@ -820,7 +828,10 @@ contract StringValidationTests is Test {
         // Test exceeding max length
         string memory tooLong = string(new bytes(mv.MAX_STRING_LENGTH() + 1));
         vm.prank(applicant2);
-        vm.expectRevert("Input too long");
+        vm.expectRevert(abi.encodeWithSelector(
+            MedicalVerifier.MedicalVerifier__StringTooLong.selector,
+            1
+        ));
         mv.applyAsDaoVerifier(tooLong, "contact", "govId");
     }
 }
@@ -830,36 +841,34 @@ contract RevocationTests is Test {
     address owner = address(999);
     address genesisMember = address(888);
 
-
     function setUp() public {
         vm.prank(owner);
         mv = new MedicalVerifier();
 
-    // Setup genesis member
-    vm.prank(genesisMember);
-    mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
-    vm.prank(owner);
-    mv.approveGenesis(genesisMember);
+        // Setup genesis member
+        vm.prank(genesisMember);
+        mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
+        vm.prank(owner);
+        mv.handleGenesisApplication(genesisMember, true);
 
+        // End Genesis period and convert to DAO
+        vm.warp(block.timestamp + mv.GENESIS_TIMEOUT() + 1 days);
 
-    // End Genesis period and convert to DAO
-    vm.warp(block.timestamp + mv.GENESIS_TIMEOUT() + 1 days);
+        mv.checkGenesisTimeout();
 
-    mv.checkGenesisTimeout();
-
-    // Update limits through DAO governance
-    vm.prank(genesisMember); // Now converted to DAO
-    mv.updateVerifierLimits(25, 25); // Increase DAO limit 
+        // Update limits through DAO governance
+        vm.prank(genesisMember); // Now converted to DAO
+        mv.updateVerifierLimits(25, 25); // Increase DAO limit
     }
 
     function _createApprovedDaoMember(address user) internal {
         // Create and approve DAO member
         vm.prank(user);
         mv.applyAsDaoVerifier("DAO Member", "contact", "govID");
-        
+
         vm.prank(genesisMember);
         mv.voteOnApplication(user, true);
-        
+
         vm.warp(block.timestamp + mv.VOTING_PERIOD());
         mv.finalizeApplication(user);
     }
@@ -870,35 +879,35 @@ contract RevocationTests is Test {
         mv.finalizeRevocation(nonExistent);
     }
 
-// function test_AutoRevoke_MissedVotes() public {
-//     address daoMember = address(111);
-//     _createApprovedDaoMember(daoMember);
-    
-//     // Create MAX_MISSED_VOTES proposals that daoMember is required to vote on
-//     for (uint i = 0; i < mv.MAX_MISSED_VOTES(); i++) {
-//         address target = address(uint160(1000 + i));
-//         _createApprovedDaoMember(target);
-        
-//         // Create a new proposal that daoMember needs to vote on
-//         address proposer = address(uint160(2000 + i));
-//         _createApprovedDaoMember(proposer);
-        
-//         vm.prank(proposer);
-//         mv.proposeRevocation(target);
-        
-//         // Fast-forward to end of voting period without daoMember voting
-//         vm.warp(block.timestamp + mv.VOTING_PERIOD());
-//         mv.finalizeRevocation(target);
-//     }
+    // function test_AutoRevoke_MissedVotes() public {
+    //     address daoMember = address(111);
+    //     _createApprovedDaoMember(daoMember);
 
-//     // Check if daoMember was auto-revoked
-//     (, MedicalVerifier.ApplicationStatus status,,) = mv.getVerifierData(daoMember);
-//     assertEq(
-//         uint256(status), 
-//         uint256(MedicalVerifier.ApplicationStatus.Revoked),
-//         "Should auto-revoke after missing votes"
-//     );
-// }
+    //     // Create MAX_MISSED_VOTES proposals that daoMember is required to vote on
+    //     for (uint i = 0; i < mv.MAX_MISSED_VOTES(); i++) {
+    //         address target = address(uint160(1000 + i));
+    //         _createApprovedDaoMember(target);
+
+    //         // Create a new proposal that daoMember needs to vote on
+    //         address proposer = address(uint160(2000 + i));
+    //         _createApprovedDaoMember(proposer);
+
+    //         vm.prank(proposer);
+    //         mv.proposeRevocation(target);
+
+    //         // Fast-forward to end of voting period without daoMember voting
+    //         vm.warp(block.timestamp + mv.VOTING_PERIOD());
+    //         mv.finalizeRevocation(target);
+    //     }
+
+    //     // Check if daoMember was auto-revoked
+    //     (, MedicalVerifier.ApplicationStatus status,,) = mv.getVerifierData(daoMember);
+    //     assertEq(
+    //         uint256(status),
+    //         uint256(MedicalVerifier.ApplicationStatus.Revoked),
+    //         "Should auto-revoke after missing votes"
+    //     );
+    // }
 }
 
 contract ProposeRevocationTests is Test {
@@ -917,7 +926,7 @@ contract ProposeRevocationTests is Test {
         vm.prank(genesisMember);
         mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
         vm.prank(owner);
-        mv.approveGenesis(genesisMember);
+        mv.handleGenesisApplication(genesisMember, true);
 
         // Create and approve health professional
         vm.prank(healthPro);
@@ -949,12 +958,12 @@ contract GenesisTimeoutTests is Test {
 
     function setUp() public {
         mv = new MedicalVerifier();
-        
+
         // Setup genesis member
         vm.prank(genesis1);
         mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
         vm.prank(mv.owner());
-        mv.approveGenesis(genesis1);
+        mv.handleGenesisApplication(genesis1, true);
     }
 
     function test_GenesisTimeout_ConvertsToDAO() public {
@@ -968,16 +977,16 @@ contract GenesisTimeoutTests is Test {
     }
 
     function test_GenesisTimeout_NotReached() public {
-    vm.warp(block.timestamp + mv.GENESIS_TIMEOUT() - 1);
-    mv.checkGenesisTimeout();
-    assertTrue(mv.genesisActive(), "Genesis should still be active");
-}
+        vm.warp(block.timestamp + mv.GENESIS_TIMEOUT() - 1);
+        mv.checkGenesisTimeout();
+        assertTrue(mv.genesisActive(), "Genesis should still be active");
+    }
 
-function test_GenesisTimeout_ExactTimeout() public {
-    vm.warp(block.timestamp + mv.GENESIS_TIMEOUT());
-    mv.checkGenesisTimeout();
-    assertFalse(mv.genesisActive(), "Genesis should be inactive");
-}
+    function test_GenesisTimeout_ExactTimeout() public {
+        vm.warp(block.timestamp + mv.GENESIS_TIMEOUT());
+        mv.checkGenesisTimeout();
+        assertFalse(mv.genesisActive(), "Genesis should be inactive");
+    }
 }
 
 contract SystemConfigTests is Test {
@@ -1010,7 +1019,7 @@ contract VerifierCountTests is Test {
         vm.prank(genesisMember);
         mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
         vm.prank(owner);
-        mv.approveGenesis(genesisMember);
+        mv.handleGenesisApplication(genesisMember, true);
 
         // Create and approve health professional
         vm.prank(applicant1);
@@ -1052,16 +1061,16 @@ contract NFTTransferTests is Test {
         vm.prank(genesisMember);
         mv.applyAsGenesis("Genesis Member", "contact", "govID", "docs");
         vm.prank(owner);
-        mv.approveGenesis(genesisMember);
+        mv.handleGenesisApplication(genesisMember, true);
 
         // Create DAO member through proper process
         vm.prank(holder);
         mv.applyAsDaoVerifier("DAO Holder", "contact", "govID");
-        
+
         // Genesis member approves the DAO application
         vm.prank(genesisMember);
         mv.voteOnApplication(holder, true);
-        
+
         // Finalize application
         vm.warp(block.timestamp + mv.VOTING_PERIOD());
         mv.finalizeApplication(holder);
@@ -1069,7 +1078,7 @@ contract NFTTransferTests is Test {
 
     function test_NFT_TransferReverts() public {
         (,,, uint256 tokenId) = mv.getVerifierData(holder);
-        
+
         vm.prank(holder);
         vm.expectRevert(MedicalVerifier.MedicalVerifier__UnauthorizedAccess.selector);
         mv.safeTransferFrom(holder, address(2), tokenId);
@@ -1085,18 +1094,23 @@ contract ApplicationTests is Test {
     function setUp() public {
         vm.prank(owner);
         mv = new MedicalVerifier();
-        
+
         // Setup genesis committee
         vm.prank(genesisMember);
         mv.applyAsGenesis("Genesis", "contact", "govID", "docs");
-        
+
         vm.prank(owner);
-        mv.approveGenesis(genesisMember);
+        mv.handleGenesisApplication(genesisMember, true);
     }
 
     function test_ApplyHealthPro_InsufficientDocuments() public {
         vm.prank(applicant1);
-        vm.expectRevert(MedicalVerifier.MedicalVerifier__ProfessionalDocsRequired.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+            MedicalVerifier.MedicalVerifier__EmptyField.selector,
+            4
+            )
+        );
         mv.applyAsHealthProfessional("Dr. NoDocs", "contact", "govID", "");
     }
 }

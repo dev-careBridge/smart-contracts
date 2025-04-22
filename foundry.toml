@@ -2,13 +2,18 @@
 src = 'src'
 out = 'out'
 libs = ['lib']
+test = 'test'
+solc = "0.8.28"
+via_ir = true
+optimizer = true
+optimizer_runs = 1000000
 remappings = [
   '@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/',
   '@foundry-devops/=lib/foundry-devops/',
   '@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/',
   'ds-test/=lib/solmate/lib/ds-test/src/',
   'forge-std/=lib/forge-std/src/',
-  'solmate/=lib/solmate/src/'
+  'solmate/=lib/solmate/src/',
 ]
 fs_permissions = [{ access = "read", path = "./broadcast" }]
 
@@ -18,6 +23,7 @@ sepolia = { key = "${ETHERSCAN_API_KEY}" }
 
 [rpc_endpoints]
 sepolia = "${SEPOLIA_RPC_URL}"
+arbitrum = "${ARBITRUM_RPC_URL}"
 zksync-local = "http://127.0.0.1:8011"
 
 [invariant]

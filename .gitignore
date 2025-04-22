@@ -12,3 +12,16 @@ docs/
 
 # Dotenv file
 .env
+
+# Frontend file
+frontend/
+
+# ABI
+msdABI.json
+
+# Note
+note.md
+NOTE00.md
+
+# README
+README.md

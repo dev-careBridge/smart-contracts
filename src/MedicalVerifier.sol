@@ -31,12 +31,10 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
     error MedicalVerifier__UnauthorizedAccess();
     error MedicalVerifier__InvalidLimit();
     error MedicalVerifier__LimitOutOfBounds();
-    error MedicalVerifier__FullNameRequired();
-    error MedicalVerifier__ContactInfoRequired();
-    error MedicalVerifier__GovernmentIDRequired();
-    error MedicalVerifier__ProfessionalDocsRequired();
     error MedicalVerifier__SelfRevocationNotAllowed();
     error MedicalVerifier__ActiveRevocationProposalExists();
+    error MedicalVerifier__StringTooLong(uint8 fieldId);
+    error MedicalVerifier__EmptyField(uint8 fieldId);
 
     using Counters for Counters.Counter;
 
@@ -161,6 +159,7 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
     event NewGenesisApplication(address applicant);
     event GenesisApproved(address member);
     event GenesisConverted(address member);
+    event GenesisRejected(address applicant);
 
     // =============================================
     // Modifiers
@@ -230,6 +229,14 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
         }
     }
 
+    function emergencyUnpause() external onlyOwner {
+        require(emergency.paused, "Not paused");
+        require(block.timestamp >= emergency.lastPauseTime + emergency.pauseDuration, "Cooldown active");
+        emergency.paused = false;
+        emergency.pauseDuration = 0;
+        emergency.lastPauseTime = 0;
+    }
+
     /**
      * @notice Submits application for Genesis committee membership
      * @dev Requires full documentation set
@@ -238,80 +245,69 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
      * @param governmentID Government-issued ID
      * @param professionalDocs Professional certifications
      */
-    function applyAsGenesis(
-        string memory fullName,
-        string memory contactInfo,
-        string memory governmentID,
-        string memory professionalDocs
-    ) external {
-        // CHECKS
-        if (genesisMembers.length >= 5) revert MedicalVerifier__ApprovedLimitReached();
-        if (verifiers[msg.sender].verifierType != VerifierType.None) {
-            revert MedicalVerifier__AlreadyApplied();
-        }
 
-        // Validate documentation
-        if (bytes(trim(fullName)).length == 0) revert MedicalVerifier__FullNameRequired();
-        if (bytes(trim(contactInfo)).length == 0) revert MedicalVerifier__ContactInfoRequired();
-        if (bytes(trim(governmentID)).length == 0) revert MedicalVerifier__GovernmentIDRequired();
+function applyAsGenesis(
+    string memory fullName,
+    string memory contactInfo,
+    string memory governmentID,
+    string memory professionalDocs
+) external {
+    if (genesisMembers.length >= 5) revert MedicalVerifier__ApprovedLimitReached();
+    if (verifiers[msg.sender].verifierType != VerifierType.None) revert MedicalVerifier__AlreadyApplied();
 
-        // EFFECTS
-        verifiers[msg.sender] = Verifier({
-            verifierType: VerifierType.Genesis,
-            status: ApplicationStatus.Pending,
-            docs: ApplicationDocs(trim(fullName), trim(contactInfo), trim(governmentID), professionalDocs),
-            nftId: 0
-        });
+    // Length checks
+    if (bytes(fullName).length > MAX_STRING_LENGTH) revert MedicalVerifier__StringTooLong(1);
+    if (bytes(contactInfo).length > MAX_STRING_LENGTH) revert MedicalVerifier__StringTooLong(2);
+    if (bytes(governmentID).length > MAX_STRING_LENGTH) revert MedicalVerifier__StringTooLong(3);
 
-        pendingGenesisApplications[msg.sender] = true;
-        applicationExpiry[msg.sender] = block.timestamp + 30 days;
+    // Required fields
+    if (bytes(trim(fullName)).length == 0) revert MedicalVerifier__EmptyField(1);
+    if (bytes(trim(contactInfo)).length == 0) revert MedicalVerifier__EmptyField(2);
+    if (bytes(trim(governmentID)).length == 0) revert MedicalVerifier__EmptyField(3);
 
-        emit NewGenesisApplication(msg.sender);
-    }
+    verifiers[msg.sender] = Verifier({
+        verifierType: VerifierType.Genesis,
+        status: ApplicationStatus.Pending,
+        docs: ApplicationDocs(trim(fullName), trim(contactInfo), trim(governmentID), professionalDocs),
+        nftId: 0
+    });
+
+    pendingGenesisApplications[msg.sender] = true;
+    applicationExpiry[msg.sender] = block.timestamp + 30 days;
+
+    emit NewGenesisApplication(msg.sender);
+}
+
 
     /**
-     * @notice Approves a Genesis committee applicant (Owner only)
-     * @dev Processes Genesis membership approval including NFT minting
-     * @param applicant Address of the Genesis applicant to approve
+     * @notice Handles Genesis committee applications (Owner only)
+     * @dev Processes approval/rejection of Genesis members
+     * @param applicant Address of the Genesis applicant
+     * @param approveFlag True to approve, False to reject
      */
-    function approveGenesis(address applicant) external onlyOwner {
-        // Expiration check
-        if (block.timestamp > applicationExpiry[applicant]) {
-            revert MedicalVerifier__NoApplicationFound();
-        }
-
-        // Validate application existence
+    function handleGenesisApplication(address applicant, bool approveFlag) external onlyOwner {
         if (!pendingGenesisApplications[applicant]) {
             revert MedicalVerifier__NoApplicationFound();
         }
 
-        // Check committee capacity
-        if (genesisMembers.length >= 5) {
-            revert MedicalVerifier__ApprovedLimitReached();
+        if (approveFlag) {
+            if (block.timestamp > applicationExpiry[applicant]) {
+                revert MedicalVerifier__NoApplicationFound();
+            }
+            if (genesisMembers.length >= 5) {
+                revert MedicalVerifier__ApprovedLimitReached();
+            }
+
+            Verifier storage v = verifiers[applicant];
+            v.status = ApplicationStatus.Approved;
+            genesisMembers.push(applicant);
+            _mintVerifierNFT(applicant);
+            emit GenesisApproved(applicant);
+        } else {
+            // Rejection logic
+            delete verifiers[applicant];
+            emit GenesisRejected(applicant);
         }
-
-        Verifier storage v = verifiers[applicant];
-        v.status = ApplicationStatus.Approved;
-        genesisMembers.push(applicant);
-        _mintVerifierNFT(applicant); // Mint credential NFT
-
-        // Cleanup application state
-        delete pendingGenesisApplications[applicant];
-        emit GenesisApproved(applicant);
-    }
-
-    /**
-     * @notice Rejects a Genesis committee application (Owner only)
-     * @dev Removes applicant data from storage
-     * @param applicant Address of the Genesis applicant to reject
-     */
-    function rejectGenesis(address applicant) external onlyOwner {
-        if (!pendingGenesisApplications[applicant]) {
-            revert MedicalVerifier__NoApplicationFound();
-        }
-
-        // Remove applicant records
-        delete verifiers[applicant];
         delete pendingGenesisApplications[applicant];
     }
 
@@ -339,67 +335,65 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
      * @param governmentID Government-issued identification
      * @param professionalDocs Professional certifications/credentials
      */
-    function applyAsHealthProfessional(
-        string memory fullName,
-        string memory contactInfo,
-        string memory governmentID,
-        string memory professionalDocs
-    ) external checkEmergency {
-        if (genesisActive && genesisMembers.length == 0) {
-            revert MedicalVerifier__NoActiveGenesisVerifiers();
-        }
 
-        // Validate required documentation
-        if (bytes(trim(fullName)).length == 0) revert MedicalVerifier__FullNameRequired();
-        if (bytes(trim(contactInfo)).length == 0) revert MedicalVerifier__ContactInfoRequired();
-        if (bytes(trim(governmentID)).length == 0) revert MedicalVerifier__GovernmentIDRequired();
-        if (bytes(trim(professionalDocs)).length == 0) revert MedicalVerifier__ProfessionalDocsRequired();
+function _apply(
+    string memory fullName,
+    string memory contactInfo,
+    string memory governmentID,
+    string memory professionalDocs,
+    VerifierType vType
+) internal {
+    if (genesisActive && genesisMembers.length == 0) revert MedicalVerifier__NoActiveGenesisVerifiers();
+    if (verifiers[msg.sender].verifierType != VerifierType.None) revert MedicalVerifier__AlreadyApplied();
 
-        // Check duplicate applications
-        if (verifiers[msg.sender].verifierType != VerifierType.None) revert MedicalVerifier__AlreadyApplied();
-
-        // Create new application record
-        verifiers[msg.sender] = Verifier({
-            verifierType: VerifierType.HealthProfessional,
-            status: ApplicationStatus.Pending,
-            docs: ApplicationDocs(trim(fullName), trim(contactInfo), trim(governmentID), trim(professionalDocs)),
-            nftId: 0
-        });
-
-        emit NewApplication(msg.sender, VerifierType.HealthProfessional);
+    // Validate length
+    if (bytes(fullName).length > MAX_STRING_LENGTH) revert MedicalVerifier__StringTooLong(1);
+    if (bytes(contactInfo).length > MAX_STRING_LENGTH) revert MedicalVerifier__StringTooLong(2);
+    if (bytes(governmentID).length > MAX_STRING_LENGTH) revert MedicalVerifier__StringTooLong(3);
+    if (vType == VerifierType.HealthProfessional && bytes(professionalDocs).length > MAX_STRING_LENGTH) {
+        revert MedicalVerifier__StringTooLong(4);
     }
 
-    /**
-     * @notice Submits DAO Verifier application
-     * @dev Requires basic identification documents (no professional docs)
-     * @param fullName Legal full name of applicant
-     * @param contactInfo Valid contact information
-     * @param governmentID Government-issued identification
-     */
-    function applyAsDaoVerifier(string memory fullName, string memory contactInfo, string memory governmentID)
-        external
-    {
-        if (genesisActive && genesisMembers.length == 0) {
-            revert MedicalVerifier__NoActiveGenesisVerifiers();
-        }
-        // Validate required fields
-        if (bytes(trim(fullName)).length == 0) revert MedicalVerifier__FullNameRequired();
-        if (bytes(trim(contactInfo)).length == 0) revert MedicalVerifier__ContactInfoRequired();
-        if (bytes(trim(governmentID)).length == 0) revert MedicalVerifier__GovernmentIDRequired();
-
-        // Check duplicate applications
-        if (verifiers[msg.sender].verifierType != VerifierType.None) revert MedicalVerifier__AlreadyApplied();
-
-        // Create DAO application record
-        verifiers[msg.sender] = Verifier({
-            verifierType: VerifierType.Dao,
-            status: ApplicationStatus.Pending,
-            docs: ApplicationDocs(trim(fullName), trim(contactInfo), trim(governmentID), ""),
-            nftId: 0
-        });
-
-        emit NewApplication(msg.sender, VerifierType.Dao);
+    // Validate non-empty trimmed input
+    if (bytes(trim(fullName)).length == 0) revert MedicalVerifier__EmptyField(1);
+    if (bytes(trim(contactInfo)).length == 0) revert MedicalVerifier__EmptyField(2);
+    if (bytes(trim(governmentID)).length == 0) revert MedicalVerifier__EmptyField(3);
+    if (vType == VerifierType.HealthProfessional && bytes(trim(professionalDocs)).length == 0) {
+        revert MedicalVerifier__EmptyField(4);
     }
+
+    verifiers[msg.sender] = Verifier({
+        verifierType: vType,
+        status: ApplicationStatus.Pending,
+        docs: ApplicationDocs(
+            trim(fullName),
+            trim(contactInfo),
+            trim(governmentID),
+            vType == VerifierType.HealthProfessional ? trim(professionalDocs) : ""
+        ),
+        nftId: 0
+    });
+
+    emit NewApplication(msg.sender, vType);
+}
+
+function applyAsHealthProfessional(
+    string memory fullName,
+    string memory contactInfo,
+    string memory governmentID,
+    string memory professionalDocs
+) external checkEmergency {
+    _apply(fullName, contactInfo, governmentID, professionalDocs, VerifierType.HealthProfessional);
+}
+
+function applyAsDaoVerifier(
+    string memory fullName,
+    string memory contactInfo,
+    string memory governmentID
+) external {
+    _apply(fullName, contactInfo, governmentID, "", VerifierType.Dao);
+}
+
 
     /**
      * @notice Casts vote on a verification application
@@ -468,18 +462,24 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
     }
 
     function trim(string memory str) public pure returns (string memory) {
-        require(bytes(str).length <= MAX_STRING_LENGTH, "Input too long");
         bytes memory strBytes = bytes(str);
-        uint256 start = 0;
-        uint256 end = strBytes.length;
 
-        while (start < end && (strBytes[start] == 0x20 || strBytes[start] == 0x09)) start++;
-        while (end > start && (strBytes[end - 1] == 0x20 || strBytes[end - 1] == 0x09)) end--;
-
-        bytes memory trimmed = new bytes(end - start);
-        for (uint256 i = start; i < end; i++) {
-            trimmed[i - start] = strBytes[i];
+        uint256 start;
+        while (start < strBytes.length && strBytes[start] == " ") {
+            start++;
         }
+
+        uint256 end = strBytes.length;
+        while (end > start && strBytes[end - 1] == " ") {
+            end--;
+        }
+
+        // Copy the trimmed substring
+        bytes memory trimmed = new bytes(end - start);
+        for (uint256 i = 0; i < trimmed.length; i++) {
+            trimmed[i] = strBytes[start + i];
+        }
+
         return string(trimmed);
     }
 
@@ -506,18 +506,18 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
 
         // CHECKS
         uint256 totalVotes = proposal.yesVotes + proposal.noVotes;
-        uint256 totalVerifiers;
+        uint256 totalVerifiersCount;
 
         if (genesisActive && proposal.genesisYesVotes > 0) {
-            totalVerifiers = genesisMembers.length;
+            totalVerifiersCount = genesisMembers.length;
         } else if (target.verifierType == VerifierType.HealthProfessional) {
-            totalVerifiers = currentHealthProfessionals;
+            totalVerifiersCount = currentHealthProfessionals;
         } else {
-            totalVerifiers = currentManualDaoVerifiers + currentAutoDaoVerifiers;
+            totalVerifiersCount = currentManualDaoVerifiers + currentAutoDaoVerifiers;
         }
 
-        require(totalVerifiers > 0, "No verifiers");
-        bool approved = (totalVotes * 100 >= totalVerifiers * MIN_PARTICIPATION)
+        require(totalVerifiersCount > 0, "No verifiers");
+        bool approved = (totalVotes * 100 >= totalVerifiersCount * MIN_PARTICIPATION)
             && (proposal.yesVotes * 100 >= totalVotes * APPROVAL_THRESHOLD);
 
         // EFFECTS
@@ -708,20 +708,20 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
 
         // Checks
         uint256 totalVotes = proposal.yesVotes + proposal.noVotes;
-        uint256 totalVerifiers;
+        uint256 totalVerifiersCount;
 
         if (targetVerifier.verifierType == VerifierType.HealthProfessional) {
-            totalVerifiers = currentHealthProfessionals;
+            totalVerifiersCount = currentHealthProfessionals;
         } else if (
             targetVerifier.verifierType == VerifierType.Dao || targetVerifier.verifierType == VerifierType.AutoDao
         ) {
-            totalVerifiers = currentManualDaoVerifiers + currentAutoDaoVerifiers;
+            totalVerifiersCount = currentManualDaoVerifiers + currentAutoDaoVerifiers;
         } else {
             revert MedicalVerifier__InvalidVerifierType();
         }
 
-        if (totalVerifiers == 0) revert MedicalVerifier__InvalidProposal();
-        bool approved = totalVotes * 100 >= totalVerifiers * MIN_PARTICIPATION
+        if (totalVerifiersCount == 0) revert MedicalVerifier__InvalidProposal();
+        bool approved = totalVotes * 100 >= totalVerifiersCount * MIN_PARTICIPATION
             && proposal.yesVotes * 100 >= totalVotes * APPROVAL_THRESHOLD;
 
         // Effects
@@ -937,23 +937,6 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
     // ---------- View Functions ---------- //
 
     /**
-     * @notice Retrieves application proposal details
-     * @param applicant Address of verification applicant
-     * @return yesVotes Number of approval votes
-     * @return noVotes Number of rejection votes
-     * @return endTime Proposal expiration timestamp
-     */
-    function getApplicationProposal(address applicant)
-        public
-        view
-        returns (uint256 yesVotes, uint256 noVotes, uint256 endTime)
-    {
-        ApplicationProposal storage proposal = applicationProposals[applicant];
-        if (!proposal.exists) revert MedicalVerifier__InvalidProposal();
-        return (proposal.yesVotes, proposal.noVotes, proposal.endTime);
-    }
-
-    /**
      * @notice Checks voting participation status
      * @param applicant Proposal target address
      * @param voter Address to check participation
@@ -961,22 +944,6 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
      */
     function hasVotedOnApplication(address applicant, address voter) public view returns (bool) {
         return applicationProposals[applicant].voted[voter];
-    }
-
-    /**
-     * @notice Retrieves revocation proposal details
-     * @param target Address of verifier under revocation
-     * @return yesVotes Votes supporting revocation
-     * @return noVotes Votes opposing revocation
-     * @return endTime Proposal expiration timestamp
-     */
-    function getRevocationProposal(address target)
-        public
-        view
-        returns (uint256 yesVotes, uint256 noVotes, uint256 endTime)
-    {
-        RevocationProposal storage proposal = revocationProposals[target];
-        return (proposal.yesVotes, proposal.noVotes, proposal.endTime);
     }
 
     /**
@@ -990,23 +957,6 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Retrieves complete verifier profile
-     * @param _address Verifier address to query
-     * @return vType Verification tier
-     * @return status Current approval status
-     * @return docs Submitted documentation
-     * @return nftId Associated credential NFT ID
-     */
-    function getVerifierData(address _address)
-        public
-        view
-        returns (VerifierType vType, ApplicationStatus status, ApplicationDocs memory docs, uint256 nftId)
-    {
-        Verifier storage v = verifiers[_address];
-        return (v.verifierType, v.status, v.docs, v.nftId);
-    }
-
-    /**
      * @notice Returns current verifier counts
      * @return health Number of Health Professionals
      * @return manualDao Number of Manual DAO Verifiers
@@ -1016,18 +966,85 @@ contract MedicalVerifier is ERC721, Ownable, ReentrancyGuard {
         return (currentHealthProfessionals, currentManualDaoVerifiers, currentAutoDaoVerifiers);
     }
 
+    function isApprovedVerifier(address _address) public view returns (bool) {
+        Verifier storage verifier = verifiers[_address];
+
+        // Check if verifier has valid type and approved status
+        return verifier.verifierType != VerifierType.None && verifier.status == ApplicationStatus.Approved;
+    }
+
+    function currentHealthProfessional() public view returns (uint256) {
+        return currentHealthProfessionals;
+    }
+
+    function currentManualDaoVerifier() public view returns (uint256) {
+        return currentManualDaoVerifiers;
+    }
+
+    function currentAutoDaoVerifier() public view returns (uint256) {
+        return currentAutoDaoVerifiers;
+    }
+
     /**
-     * @notice Returns system configuration parameters
-     * @return maxHP Health Professional capacity
-     * @return maxDao Manual DAO Verifier capacity
-     * @return minDonation Minimum qualifying donation amount
-     * @return minCampaigns Required campaigns for AutoDAO status
+     * @notice Returns array of all Genesis committee members
+     * @return Array of Genesis member addresses
      */
+    function getGenesisMembers() public view returns (address[] memory) {
+        return genesisMembers;
+    }
+
+    /**
+     * @notice Returns detailed application proposal info
+     * @param applicant Applicant address
+     * @return exists Proposal existence status
+     * @return genesisYesVotes Genesis committee approvals
+     * @return totalVoters Number of participating voters
+     */
+    function getApplicationProposalDetails(address applicant)
+        public
+        view
+        returns (bool exists, uint256 genesisYesVotes, uint256 totalVoters)
+    {
+        ApplicationProposal storage proposal = applicationProposals[applicant];
+        return (proposal.exists, proposal.genesisYesVotes, proposal.yesVotes + proposal.noVotes);
+    }
+
+    /**
+     * @notice Returns last revocation attempt timestamp
+     * @param target Verifier address
+     * @return Timestamp of last revocation attempt
+     */
+    function getLastRevocationAttempt(address target) public view returns (uint256) {
+        return lastRevocationAttempt[target];
+    }
+
+    function totalVerifiers() public view returns (uint256) {
+        return currentHealthProfessionals + currentManualDaoVerifiers + currentAutoDaoVerifiers;
+    }
+
+    function getApplicationProposalEndTime(address applicant) public view returns (uint256) {
+        return applicationProposals[applicant].endTime;
+    }
+
+    function getRevocationProposalEndTime(address target) public view returns (uint256) {
+        return revocationProposals[target].endTime;
+    }
+
+    function getVerifierData(address _address)
+        public
+        view
+        returns (VerifierType verifierType, ApplicationStatus status, ApplicationDocs memory docs, uint256 nftId)
+    {
+        Verifier storage v = verifiers[_address];
+        return (v.verifierType, v.status, v.docs, v.nftId);
+    }
+
+    // Add to MedicalVerifier contract
     function getSystemConfig()
         public
         view
-        returns (uint256 maxHP, uint256 maxDao, uint256 minDonation, uint256 minCampaigns)
+        returns (uint256 maxHealth, uint256 maxManualDao, uint256 currentHealth, uint256 currentManualDao)
     {
-        return (maxHealthProfessionals, maxManualDaoVerifiers, MIN_DONATION, MIN_CAMPAIGNS_REQUIRED);
+        return (maxHealthProfessionals, maxManualDaoVerifiers, currentHealthProfessionals, currentManualDaoVerifiers);
     }
 }
